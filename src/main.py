@@ -2,14 +2,13 @@
 """
 src/main.py
 
-Unified multi-object detection runner:
+Unified multi-object detection runner with lane detection:
 - runs face detection, pedestrian detection, YOLO object detection
 - draws color-coded boxes on frame
+- draws lane lines using draw_lines(frame, lines)
 - collects detections per-frame and writes a single JSON log at the end
-- usage: python src/main.py             # runs webcam (0)
-       python src/main.py --source video.mp4
-       python src/main.py --source 0 --log ../output/detections_log.json
 """
+
 import cv2
 import json
 import time
@@ -17,12 +16,38 @@ import os
 import argparse
 from pathlib import Path
 
-# Local (same-folder) imports — ensure this file is executed from repo src folder
+# Local imports
 from face_detection import detect_faces_in_frame
-from multi_object_detection import detect_objects_in_frame, detect_cars_in_frame  # keep both if you have separate helpers
+from multi_object_detection import detect_objects_in_frame, detect_cars_in_frame
 from pedestrian_detection import detect_pedestrians_in_frame
 
-# Color map for different types (extend as required)
+# -------------------------------
+# Lane detection placeholder
+# Replace with your actual implementation
+# -------------------------------
+def detect_lanes(frame):
+    """
+    Dummy placeholder for lane detection.
+    Replace with real Hough/canny pipeline.
+    Should return: list of lines: [ [x1,y1,x2,y2], ... ]
+    """
+    return []
+
+
+def draw_lines(frame, lines):
+    """
+    Draw lane lines on the frame.
+    Each line is a list/tuple: (x1, y1, x2, y2)
+    """
+    lane_frame = frame.copy()
+    for line in lines:
+        if len(line) == 4:
+            x1, y1, x2, y2 = line
+            cv2.line(lane_frame, (x1, y1), (x2, y2), (0, 255, 255), 5)
+    return lane_frame
+# -------------------------------
+
+
 TYPE_COLORS = {
     "person": (0, 255, 0),
     "car": (0, 200, 0),
@@ -34,12 +59,7 @@ TYPE_COLORS = {
     "default": (255, 255, 0)
 }
 
-
 def get_color_for_label(label: str):
-    """
-    Pick a color for a label. If label contains known keywords use that color,
-    otherwise return default.
-    """
     lbl = label.lower()
     for k in TYPE_COLORS:
         if k != "default" and k in lbl:
@@ -48,32 +68,21 @@ def get_color_for_label(label: str):
 
 
 def normalize_bbox(bbox):
-    """
-    Accept bbox in several formats and return integers x1,y1,x2,y2
-    - bbox may be [x,y,w,h] or [x1,y1,x2,y2]
-    - may be floats - convert to int
-    """
     if bbox is None:
         return None
     bbox = list(bbox)
     if len(bbox) == 4:
-        # detect if it's x,y,w,h by checking second pair relative to first
         x0, y0, x1, y1 = bbox
-        # Heuristic: if x1 and y1 are widths/heights (small) treat as w,h
         if (x1 - x0) < 0 or (y1 - y0) < 0:
-            # treat as x,y,w,h
             x, y, w, h = bbox
             return [int(x), int(y), int(x + w), int(y + h)]
         else:
-            # treat as x1,y1,x2,y2
             return [int(x0), int(y0), int(x1), int(y1)]
     else:
-        # unexpected format
         return [int(float(v)) for v in bbox[:4]]
 
 
 def main(args):
-    # Resolve paths relative to the script's location
     script_dir = Path(__file__).resolve().parent
     default_output_dir = script_dir.parent / "output"
     output_dir = Path(args.log).parent if args.log else default_output_dir
@@ -86,7 +95,7 @@ def main(args):
         source_int = int(source)
         source_val = source_int
     except Exception:
-        source_val = source  # path string
+        source_val = source
 
     cap = cv2.VideoCapture(source_val)
     if not cap.isOpened():
@@ -95,10 +104,8 @@ def main(args):
 
     print(f"Starting continuous object detection on source={source_val}. Press 'q' to quit.")
     frame_count = 0
-    all_detections = []  # collect dictionaries to save as JSON at the end
+    all_detections = []
     start_time = time.time()
-
-    # For FPS calc
     prev_time = time.time()
 
     try:
@@ -117,7 +124,7 @@ def main(args):
                 "objects": []
             }
 
-            # 1) Face detection (Haar)
+            # 1) Face detection
             try:
                 faces = detect_faces_in_frame(frame)
             except Exception as e:
@@ -136,9 +143,9 @@ def main(args):
                 cv2.putText(frame, "Face", (bbox[0], bbox[1] - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # 2) YOLO / generic object detection (cars, etc.)
+            # 2) YOLO / generic object detection
             try:
-                objects = detect_objects_in_frame(frame)  # expects list of dicts: {'type','bbox','confidence'}
+                objects = detect_objects_in_frame(frame)
             except Exception as e:
                 objects = []
                 print(f"Warning: object detection error: {e}")
@@ -163,14 +170,13 @@ def main(args):
                 cv2.putText(frame, f"{obj_type} {obj_conf:.2f}", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # 3) Cars-specific helper (if available)
+            # 3) Cars-specific helper
             try:
                 cars = detect_cars_in_frame(frame)
             except Exception:
                 cars = []
 
             for car in cars:
-                # car dict expected: {'type','bbox','confidence'}
                 car_type = str(car.get("type", "car"))
                 car_conf = float(car.get("confidence", 0.0))
                 bbox = normalize_bbox(car.get("bbox"))
@@ -182,13 +188,14 @@ def main(args):
                     "bbox": bbox,
                     "confidence": car_conf
                 })
+
                 color = get_color_for_label(car_type)
                 x1, y1, x2, y2 = bbox
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(frame, f"{car_type} {car_conf:.2f}", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # 4) Pedestrian detection (Haar or custom)
+            # 4) Pedestrian detection
             try:
                 pedestrians = detect_pedestrians_in_frame(frame)
             except Exception as e:
@@ -199,7 +206,7 @@ def main(args):
                 ped_type = ped.get("type", "pedestrian")
                 ped_conf = float(ped.get("confidence", 0.9))
                 bbox_raw = ped.get("bbox")
-                # If ped bbox is (x,y,w,h)
+
                 if isinstance(bbox_raw, (list, tuple)) and len(bbox_raw) == 4:
                     x, y, w, h = bbox_raw
                     bbox = [int(x), int(y), int(x + w), int(y + h)]
@@ -221,7 +228,7 @@ def main(args):
                 cv2.putText(frame, "Pedestrian", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # If any detections, print + store
+            # Store detection record
             if detections["objects"]:
                 print(f"Frame {frame_count}: Detected {len(detections['objects'])} objects")
                 all_detections.append(detections)
@@ -233,8 +240,15 @@ def main(args):
             cv2.putText(frame, f"FPS: {fps:.1f}", (30, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-            # Show
-            cv2.imshow("Multi-Object Detection", frame)
+            # ------------------------
+            # LANE DETECTION INTEGRATION
+            # ------------------------
+            lines = detect_lanes(frame)
+            lane_frame = draw_lines(frame, lines)
+
+            # Display lane-augmented frame
+            cv2.imshow("Multi-Object Detection", lane_frame)
+
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 print("Quitting by user request.")
                 break
@@ -243,7 +257,6 @@ def main(args):
         print("Interrupted by user.")
 
     finally:
-        # Save JSON log (write once to avoid trailing commas)
         try:
             with open(log_file_path, "w") as f:
                 json.dump(all_detections, f, indent=2)
@@ -254,16 +267,19 @@ def main(args):
         cap.release()
         cv2.destroyAllWindows()
         total_time = time.time() - start_time
-        print(f"Stopped. Processed {frame_count} frames in {total_time:.2f}s ({frame_count/ (total_time+1e-6):.2f} FPS).")
+        print(f"Stopped. Processed {frame_count} frames in "
+              f"{total_time:.2f}s ({frame_count/ (total_time+1e-6):.2f} FPS).")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-object detection runner")
-    parser.add_argument("--source", type=str, default="0", help="Video source (0 for webcam or path to video file)")
-    parser.add_argument("--log", type=str, default="", help="Optional output JSON log path (default: ./output/detections_log.json)")
+    parser.add_argument("--source", type=str, default="0",
+                        help="Video source (0 for webcam or path to video file)")
+    parser.add_argument("--log", type=str, default="",
+                        help="Optional output JSON log path")
+
     args = parser.parse_args()
 
-    # Normalize default log path
     if not args.log:
         args.log = str(Path(__file__).resolve().parent.parent / "output" / "detections_log.json")
 
